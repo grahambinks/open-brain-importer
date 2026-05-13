@@ -176,12 +176,12 @@ while true; do
   log "$RESULT"
 
   # ── Parse results ─────────────────────────────────────
-  INGESTED=$(echo "$RESULT"  | grep -oE "^[[:space:]]+Ingested[[:space:]]+:[[:space:]]+[0-9]+" | grep -oE "[0-9]+" || echo "0")
-  ALREADY=$(echo "$RESULT"   | grep -oE "Already ingested[[:space:]]+:[[:space:]]+[0-9]+"       | grep -oE "[0-9]+" | head -1 || echo "0")
-  FOUND=$(echo "$RESULT"     | grep -oE "Emails found[[:space:]]+:[[:space:]]+[0-9]+"           | grep -oE "[0-9]+" || echo "0")
-  SKIPPED=$(echo "$RESULT"   | grep -oE "Skipped \(noise\)[[:space:]]+:[[:space:]]+[0-9]+"      | grep -oE "[0-9]+" || echo "0")
-  ERRORS=$(echo "$RESULT"    | grep -oE "Errors[[:space:]]+:[[:space:]]+[0-9]+"                 | grep -oE "[0-9]+" || echo "0")
-  COST=$(echo "$RESULT"      | grep -oE "Est\. API cost[[:space:]]+:[[:space:]]+\\\$[0-9.]+"    | grep -oE "[0-9.]+" || echo "0")
+  INGESTED=$(echo "$RESULT"  | grep -oE "Ingested[[:space:]]+:[[:space:]]+[0-9]+"         | tail -1 | grep -oE "[0-9]+" || echo "0")
+  ALREADY=$(echo "$RESULT"   | grep -oE "Already ingested[[:space:]]+:[[:space:]]+[0-9]+" | grep -oE "[0-9]+" | head -1 || echo "0")
+  FOUND=$(echo "$RESULT"     | grep -oE "Emails found[[:space:]]+:[[:space:]]+[0-9]+"     | grep -oE "[0-9]+" || echo "0")
+  SKIPPED=$(echo "$RESULT"   | grep -oE "Skipped \(noise\)[[:space:]]+:[[:space:]]+[0-9]+"| grep -oE "[0-9]+" || echo "0")
+  ERRORS=$(echo "$RESULT"    | grep -oE "Errors[[:space:]]+:[[:space:]]+[0-9]+"           | grep -oE "[0-9]+" || echo "0")
+  COST=$(echo "$RESULT"      | grep -oE "\\\$[0-9]+\.[0-9]+"                              | grep -oE "[0-9]+\.[0-9]+" | tail -1 || echo "0")
 
   TOTAL_INGESTED=$((TOTAL_INGESTED + INGESTED))
   TOTAL_COST=$(echo "$TOTAL_COST + $COST" | bc 2>/dev/null || echo "$TOTAL_COST")

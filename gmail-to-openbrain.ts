@@ -23,6 +23,7 @@
  *   --query=STRING                  Extra Gmail query string
  *   --include-to                    Include To: field in content prefix
  *   --import-batch=STRING           Batch ID (default: YYYY-MM-DD-run1)
+ *   --concurrency=N                 Parallel emails to process (default: 5)
  *   --limit=N                       Max emails per label (default: unlimited)
  *   --dry-run                       Preview without ingesting
  *   --list-labels                   List Gmail labels and exit
@@ -56,6 +57,7 @@ interface CliArgs {
   includeTo: boolean;
   importBatch: string;
   limit: number;
+  concurrency: number;
   dryRun: boolean;
   listLabels: boolean;
 }
@@ -70,17 +72,19 @@ function parseArgs(): CliArgs {
     includeTo: false,
     importBatch: `${today}-run1`,
     limit: 0,
+    concurrency: 5,
     dryRun: false,
     listLabels: false,
   };
   for (const arg of Deno.args) {
     if (arg.startsWith("--window="))            args.window = arg.split("=")[1];
     else if (arg.startsWith("--before="))        args.before = arg.split("=")[1];
-    else if (arg.startsWith("--labels="))        args.labels = arg.split("=")[1].split(",").map(l => l.trim().toUpperCase());
+    else if (arg.startsWith("--labels="))        args.labels = arg.split("=")[1].split(",").map(l => l.trim());
     else if (arg.startsWith("--query="))         args.query = arg.split("=")[1];
     else if (arg === "--include-to")              args.includeTo = true;
     else if (arg.startsWith("--import-batch="))  args.importBatch = arg.split("=")[1];
     else if (arg.startsWith("--limit="))         args.limit = parseInt(arg.split("=")[1], 10);
+    else if (arg.startsWith("--concurrency="))   args.concurrency = parseInt(arg.split("=")[1], 10);
     else if (arg === "--dry-run")                 args.dryRun = true;
     else if (arg === "--list-labels")             args.listLabels = true;
   }
@@ -548,13 +552,14 @@ async function main() {
   const beforeClause = args.before ? " before:" + args.before.replace(/-/g, "/") : "";
   const extraQuery = args.query ? " " + args.query : "";
   const query = windowToQuery(args.window) + beforeClause + extraQuery;
-  const sourceType = args.labels.some(l => l === "INBOX" || l === "ALL_MAIL") ? "email-received" : "email-sent";
+  const sourceType = (args.labels.some(l => ["INBOX", "ALL_MAIL", "Label_1", "CATEGORY_PERSONAL"].includes(l)) || args.query.includes("-from:")) ? "email-received" : "email-sent";
 
   console.log(`\nFetching emails...`);
   console.log(`  Labels      : ${args.labels.join(", ")}`);
   console.log(`  Window      : ${args.window}${query ? ` (${query.trim()})` : ""}`);
   console.log(`  Import batch: ${args.importBatch}`);
   console.log(`  Source type : ${sourceType}`);
+  console.log(`  Concurrency : ${args.dryRun ? "1 (dry-run)" : args.concurrency}`);
   console.log(`  Mode        : ${args.dryRun ? "DRY RUN" : "Supabase direct insert"}`);
   if (args.limit > 0) console.log(`  Limit       : ${args.limit}`);
   console.log();
@@ -565,18 +570,14 @@ async function main() {
   let processed = 0, ingested = 0, alreadyIngested = 0, skippedNoise = 0, errors = 0;
   let totalWords = 0, totalCost = 0;
 
-  for (let i = 0; i < messageRefs.length; i++) {
-    const ref = messageRefs[i];
-
-    // Proactive token refresh every 50 emails
-    if (i > 0 && i % 50 === 0) await getAccessToken(creds);
-
+  // ── Process one email ────────────────────────────────
+  async function processOne(ref: GmailMessageRef, idx: number): Promise<void> {
     let msg: GmailMessage;
     try { msg = await getMessage(accessToken, ref.id); }
     catch (err) {
       errors++;
       await writeAuditEntry({ gmail_id: ref.id, date: "", subject: "", from: "", to: "", status: "error", reason: String(err), import_batch: args.importBatch, timestamp: new Date().toISOString() });
-      continue;
+      return;
     }
 
     const subject = getHeader(msg, "Subject");
@@ -588,7 +589,7 @@ async function main() {
     if (!email) {
       skippedNoise++;
       await writeAuditEntry({ gmail_id: ref.id, date, subject, from, to, status: "noise", reason: "filtered", import_batch: args.importBatch, timestamp: new Date().toISOString() });
-      continue;
+      return;
     }
 
     processed++;
@@ -596,13 +597,13 @@ async function main() {
     const content = buildContent(email, args.includeTo);
 
     if (args.dryRun) {
-      console.log(`${i + 1}. ${email.subject}`);
+      console.log(`${idx + 1}. ${email.subject}`);
       console.log(`   From: ${email.from} | ${email.wordCount} words | ${email.date.slice(0, 10)}`);
       if (args.includeTo) console.log(`   To: ${email.to}`);
       console.log(`   Labels: ${email.labels.join(", ")}`);
       console.log(`   "${email.body.slice(0, 120)}..."\n`);
       await writeAuditEntry({ gmail_id: ref.id, date, subject, from, to, status: "dry-run", import_batch: args.importBatch, timestamp: new Date().toISOString() });
-      continue;
+      return;
     }
 
     let metadata: ExtractedMetadata;
@@ -618,7 +619,7 @@ async function main() {
       await writeAuditEntry({ gmail_id: ref.id, date, subject, from, to, status: "duplicate", import_batch: args.importBatch, timestamp: new Date().toISOString() });
     } else if (result.ok) {
       ingested++;
-      console.log(`${i + 1}. ${email.subject}`);
+      console.log(`${idx + 1}. ${email.subject}`);
       console.log(`   From: ${email.from} | ${email.wordCount} words | ${email.date.slice(0, 10)}`);
       console.log(`   -> Ingested: ${metadata.type} — ${metadata.topics.join(", ")} (confidence: ${metadata.confidence.toFixed(2)})\n`);
       await writeAuditEntry({ gmail_id: ref.id, date, subject, from, to, status: "ingested", import_batch: args.importBatch, timestamp: new Date().toISOString() });
@@ -628,6 +629,22 @@ async function main() {
       await writeAuditEntry({ gmail_id: ref.id, date, subject, from, to, status: "error", reason: result.error, import_batch: args.importBatch, timestamp: new Date().toISOString() });
     }
   }
+
+  // ── Parallel processing loop ──────────────────────────
+  const CONCURRENCY = args.dryRun ? 1 : args.concurrency;
+  for (let i = 0; i < messageRefs.length; i += CONCURRENCY) {
+    // Proactive token refresh every 50 emails
+    if (i > 0 && i % 50 === 0) await getAccessToken(creds);
+
+    const batch = messageRefs.slice(i, i + CONCURRENCY);
+    await Promise.all(batch.map((ref, j) => processOne(ref, i + j)));
+
+    // Progress indicator every 50 emails
+    if (!args.dryRun && i % 50 === 0 && i > 0) {
+      process.stdout.write(`\r  Progress: ${i}/${messageRefs.length} (${ingested} ingested, ${alreadyIngested} dupes, ${skippedNoise} noise)`);
+    }
+  }
+  if (!args.dryRun) console.log();
 
   console.log("─".repeat(60));
   console.log(`Summary:`);
